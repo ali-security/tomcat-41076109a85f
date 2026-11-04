@@ -17,7 +17,13 @@
 package org.apache.catalina.valves;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.ResourceBundle;
 
 import javax.servlet.AsyncContext;
 import javax.servlet.RequestDispatcher;
@@ -36,6 +42,7 @@ import org.apache.catalina.Wrapper;
 import org.apache.catalina.startup.Tomcat;
 import org.apache.catalina.startup.TomcatBaseTest;
 import org.apache.tomcat.util.buf.ByteChunk;
+import org.apache.tomcat.util.collections.CaseInsensitiveKeyMap;
 import org.apache.tomcat.util.descriptor.web.ErrorPage;
 import org.apache.tomcat.util.res.StringManager;
 
@@ -260,6 +267,122 @@ public class TestErrorReportValve extends TomcatBaseTest {
 
         Assert.assertEquals(res.toString(), "OK");
         Assert.assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, rc);
+    }
+
+
+    @Test
+    public void testAcceptLanguageResourceBundleCacheUsage() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        // No file system docBase required
+        getProgrammaticRootContext();
+
+        tomcat.start();
+
+        int initial = resourceBundleCacheSize();
+
+        final int requests = 20;
+        final int localesPerRequest = 20;
+        for (int i = 0; i < requests; i++) {
+            StringBuilder acceptLanguage = new StringBuilder();
+            for (int j = 0; j < localesPerRequest; j++) {
+                if (acceptLanguage.length() > 0) {
+                    acceptLanguage.append(',');
+                }
+                acceptLanguage.append(fakeLanguageTag(i * localesPerRequest + j));
+            }
+            Map<String,List<String>> reqHead = new HashMap<>();
+            reqHead.put("Accept-Language", Collections.singletonList(acceptLanguage.toString()));
+            ByteChunk res = new ByteChunk();
+            int rc = getUrl("http://localhost:" + getPort() + "/does-not-exist-" + i, res, reqHead, null);
+            Assert.assertEquals(HttpServletResponse.SC_NOT_FOUND, rc);
+        }
+
+        int delta = resourceBundleCacheSize() - initial;
+        Assert.assertTrue("ResourceBundle cache grew by " + delta + " entries for " +
+                (requests * localesPerRequest) + " unknown request locales", delta < 50);
+    }
+
+
+    /*
+     * Requests that stay within the maxLocaleCount limit still pass every
+     * distinct (unknown) locale to the StringManager. Those lookups must not
+     * add permanent entries to the JVM-wide ResourceBundle cache.
+     */
+    @Test
+    public void testAcceptLanguageResourceBundleCacheUsageWithinLimit() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        // No file system docBase required
+        getProgrammaticRootContext();
+
+        tomcat.start();
+
+        int initial = resourceBundleCacheSize();
+
+        final int requests = 50;
+        final int localesPerRequest = 10;
+        for (int i = 0; i < requests; i++) {
+            StringBuilder acceptLanguage = new StringBuilder();
+            for (int j = 0; j < localesPerRequest; j++) {
+                if (acceptLanguage.length() > 0) {
+                    acceptLanguage.append(',');
+                }
+                acceptLanguage.append(fakeLanguageTag(10000 + i * localesPerRequest + j));
+            }
+            Map<String,List<String>> reqHead = new HashMap<>();
+            reqHead.put("Accept-Language", Collections.singletonList(acceptLanguage.toString()));
+            ByteChunk res = new ByteChunk();
+            int rc = getUrl("http://localhost:" + getPort() + "/does-not-exist-" + i, res, reqHead, null);
+            Assert.assertEquals(HttpServletResponse.SC_NOT_FOUND, rc);
+        }
+
+        int delta = resourceBundleCacheSize() - initial;
+        Assert.assertTrue("ResourceBundle cache grew by " + delta + " entries for " +
+                (requests * localesPerRequest) + " unknown request locales", delta < 50);
+    }
+
+
+    /*
+     * A supported locale listed after unknown locales is still selected for
+     * the error report.
+     */
+    @Test
+    public void testAcceptLanguageSupportedLocaleAfterUnknown() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        // No file system docBase required
+        getProgrammaticRootContext();
+
+        tomcat.start();
+
+        Map<String,List<String>> reqHead = new HashMap<>();
+        reqHead.put("Accept-Language", Collections.singletonList("zzzzz,zzzzy;q=0.9,fr;q=0.8"));
+        Map<String,List<String>> resHead = new CaseInsensitiveKeyMap<>();
+        ByteChunk res = new ByteChunk();
+        int rc = getUrl("http://localhost:" + getPort() + "/does-not-exist", res, reqHead, resHead);
+        Assert.assertEquals(HttpServletResponse.SC_NOT_FOUND, rc);
+        Assert.assertEquals("fr", getSingleHeader("Content-Language", resHead));
+    }
+
+
+    private static String fakeLanguageTag(int i) {
+        StringBuilder tag = new StringBuilder("xxxxx");
+        int v = i;
+        for (int k = 4; k >= 0; k--) {
+            tag.setCharAt(k, (char) ('a' + v % 26));
+            v /= 26;
+        }
+        return tag.toString();
+    }
+
+
+    @SuppressWarnings("unchecked")
+    private static int resourceBundleCacheSize() throws Exception {
+        Field field = ResourceBundle.class.getDeclaredField("cacheList");
+        field.setAccessible(true);
+        Map<Object,Object> cache = (Map<Object,Object>) field.get(null);
+        return cache.size();
     }
 
 
